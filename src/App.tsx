@@ -191,6 +191,9 @@ function ScreenshotButton({ theme, busy, onClick }: { theme: Theme; busy: boolea
 
 function Panel({ dash, dark, themePref, onToggleTheme, openGen, active }: { dash: Dashboard; dark: boolean; themePref: "dark" | "light" | "system"; onToggleTheme: () => void; openGen: number; active: boolean }) {
   const t = TH[dark ? "dark" : "light"];
+  // Older browser-preview snapshots predate the source field; keep them usable.
+  const source = dash.source ?? "claude";
+  const sourceLabel = source === "codex" ? "Codex" : "Claude";
   // Drag the popover by its body (Windows/Linux only — macOS uses the menu-bar
   // NSPanel and is gated out). A real OS window-drag begins only once the
   // pointer moves past a small threshold, so a plain click still clicks through
@@ -202,7 +205,7 @@ function Panel({ dash, dark, themePref, onToggleTheme, openGen, active }: { dash
   const M = P.metrics;
   // animated Total tokens: counts up from 0 on each open / period switch;
   // held at 0 while the popover is hidden so it never flashes the final value.
-  const animTotal = useCountUp(M.totalTokens, `${period}:${openGen}`, active);
+  const animTotal = useCountUp(M.totalTokens, `${source}:${period}:${openGen}`, active);
   const models = P.models;
   // Hide noise: 0% token-share rows, and $0 entries in the cost donut.
   // Show models whose share is at least 0.1% when rounded to 1 decimal; below
@@ -308,6 +311,11 @@ function Panel({ dash, dark, themePref, onToggleTheme, openGen, active }: { dash
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <TokenGlyph color={t.accent} size={16} />
             <span style={{ font: `600 13px ${t.ui}`, color: t.text, letterSpacing: ".01em" }}>Tokenscope</span>
+            <span style={{
+              font: `600 8.5px ${t.mono}`, color: t.accent, letterSpacing: ".03em",
+              padding: "2px 5px", borderRadius: 5, background: `${t.accent}18`,
+              border: `1px solid ${t.accent}38`,
+            }}>{sourceLabel}</span>
           </div>
           <div data-no-drag="" style={{ display: "flex", alignItems: "center", gap: 8, cursor: "default" }}>
             <Segmented value={period} theme={t} onSelect={(v) => setPeriod(v as any)} />
@@ -378,7 +386,7 @@ function Panel({ dash, dark, themePref, onToggleTheme, openGen, active }: { dash
               <span style={{ font: `500 10px ${t.mono}`, color: t.faint, whiteSpace: "nowrap" }}><span style={{ color: t.text, fontWeight: 600 }}>{fmtInt(M.mcpCalls)}</span> · {M.servers} servers</span>
             </div>
             {P.mcp.length > 0
-              ? <BarList key={period} items={P.mcp} theme={t} accent={t.accent} />
+              ? <BarList key={`${source}:${period}`} items={P.mcp} theme={t} accent={t.accent} />
               : <div style={{ font: `500 10px ${t.mono}`, color: t.faint, padding: "2px 0" }}>No MCP calls in this period</div>}
           </>
         )}
@@ -391,7 +399,7 @@ function Panel({ dash, dark, themePref, onToggleTheme, openGen, active }: { dash
               <span style={{ font: `500 10px ${t.mono}`, color: t.faint, whiteSpace: "nowrap" }}><span style={{ color: t.text, fontWeight: 600 }}>{fmtInt(M.skillCalls)}</span> · {M.skills} skills</span>
             </div>
             {P.skills.length > 0
-              ? <BarList key={period} items={P.skills} theme={t} accent={t.accent} />
+              ? <BarList key={`${source}:${period}`} items={P.skills} theme={t} accent={t.accent} />
               : <div style={{ font: `500 10px ${t.mono}`, color: t.faint, padding: "2px 0" }}>No skill calls in this period</div>}
           </>
         )}

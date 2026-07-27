@@ -1,6 +1,6 @@
-// Parse ~/.claude/projects/**/*.jsonl, dedupe assistant messages by id,
-// classify tool calls (user-installed MCP / Skill only), and aggregate
-// into Day / Week / Month reports + a daily heatmap.
+// Aggregate the source-specific event store (Claude or Codex), apply pricing
+// and user-installed MCP/Skill filters, and build Day / Week / Month reports
+// plus a daily heatmap.
 use crate::config::UserConfig;
 use crate::model::*;
 use crate::pricing::Pricing;
@@ -52,7 +52,12 @@ fn vendor_of(model: &str) -> &'static str {
     let m = model.to_lowercase();
     if m.contains("claude") {
         "Anthropic"
-    } else if m.contains("gpt") || m.contains("o1") || m.contains("o3") {
+    } else if m.contains("gpt")
+        || m.contains("codex")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+    {
         "OpenAI"
     } else if m.contains("gemini") {
         "Google"
@@ -67,14 +72,14 @@ fn vendor_of(model: &str) -> &'static str {
     }
 }
 
-pub fn build_dashboard() -> Dashboard {
+pub fn build_dashboard(source: UsageSource) -> Dashboard {
     let _guard = BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     // 1. Ingest incrementally (full scan only on first run; afterwards just the
     //    appended lines), prune events older than the heatmap window, and persist
     //    only when something actually changed — so an idle tick doesn't rewrite
     //    the entire events.json every 30s.
-    let mut store = Store::load();
+    let mut store = Store::load(source);
     let mut dirty = store.ingest();
     // Reports/heatmap span ~26 weeks (+ prev month); 210 days leaves margin.
     let cutoff = (Local::now() - Duration::days(210)).timestamp_millis();
@@ -86,7 +91,7 @@ pub fn build_dashboard() -> Dashboard {
     }
 
     // 2. Aggregate: apply current config + prices, slice by current time.
-    let cfg = UserConfig::load();
+    let cfg = UserConfig::load(source);
     // Memoized price table (cheap clone); loaded/refreshed off-thread elsewhere
     // so neither parsing nor the network runs while we hold BUILD_LOCK.
     let pricing = Pricing::shared();
@@ -121,6 +126,7 @@ pub fn build_dashboard() -> Dashboard {
         .sum();
 
     Dashboard {
+        source,
         day,
         week,
         month,

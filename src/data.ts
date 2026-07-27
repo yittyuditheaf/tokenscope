@@ -14,6 +14,7 @@ export interface PeriodReport {
 }
 export interface HeatDay { date: string; tokens: number; level: number }
 export interface Dashboard {
+  source: "claude" | "codex";
   day: PeriodReport; week: PeriodReport; month: PeriodReport;
   heatmap: HeatDay[]; todayTokens: number; generatedAt: string;
 }

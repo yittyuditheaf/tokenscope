@@ -4,7 +4,7 @@
 
 <a href="https://www.producthunt.com/products/tokenscope-2?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-tokenscope-2" target="_blank" rel="noopener noreferrer"><img alt="Tokenscope - MacOS menu-bar dashboard for Claude CLI token usage | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1165012&amp;theme=light&amp;t=1780816780292"></a>
 
-**macOS 菜单栏 / Windows 系统托盘工具**，展示 Claude CLI 的 **每日 Token 用量、估算花费、按模型 / MCP / Skill 的调用统计**。
+**macOS 菜单栏 / Windows 系统托盘工具**，展示 Claude Code 或 Codex 的 **每日 Token 用量、估算花费、按模型 / MCP / Skill 的调用统计**。
 
 技术栈：**Tauri 2 + React + TypeScript**（前端）/ **Rust**（数据层）。
 
@@ -13,28 +13,30 @@
 ## 它做什么
 
 - 菜单栏图标旁显示当日 Token 数（如 `⬡ 14.00M`）
+- 托盘图标右键可在 **Claude / Codex** 统计源之间切换，并记住选择
 - 点击打开面板：Day / Week / Month 切换
 - 指标：总 Token（input/output）、估算花费、Requests / Sessions
 - 三个切片：**按模型** / **按 MCP 调用** / **按 Skill 调用**
 - 成本甜甜圈（hover 看单模型）、年度活跃热力图
-- **只统计用户自己安装的 MCP / Skill**，过滤所有 Claude 内置工具与 Anthropic 自带 MCP
+- **只统计当前数据源中用户自己安装的 MCP / Skill**，过滤内置工具和捆绑服务
 
 ## 数据来源（零侵入，只读）
 
 | 用途 | 路径 |
 |------|------|
-| 会话日志（Token / 模型 / 工具调用） | `~/.claude/projects/**/*.jsonl` |
-| 用户 MCP 白名单 | `~/.claude.json` → `mcpServers` + `projects[*].mcpServers` |
-| 用户 Skill 白名单 | `~/.claude/skills/` 目录 |
+| Claude 会话日志（Token / 模型 / 工具调用） | `~/.claude/projects/**/*.jsonl` |
+| Codex 会话日志（Token / 模型 / 工具调用） | `$CODEX_HOME/sessions/**/*.jsonl`（默认 `~/.codex/sessions/**/*.jsonl`） |
+| Claude 用户 MCP / Skill 白名单 | `~/.claude.json`；`~/.claude/skills/` |
+| Codex 用户 MCP / Skill 白名单 | `$CODEX_HOME/config.toml`；`$CODEX_HOME/skills/` |
 | 模型价格 | **主**：[models.dev](https://models.dev/api.json)（裸模型名，匹配 Claude CLI 日志）→ **兜底**：[LiteLLM](https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json) → 内置快照。缓存于 `~/Library/Caches/tokenscope/`，24h 刷新，离线回退 |
 
 ### 关键处理
-- 按 `message.id` 去重（流式/重试会重复 usage）；同一消息跨多行时合并其工具调用，token 只计一次
+- Claude 按 `message.id` 去重并合并跨行工具调用；Codex 按会话累计用量签名去重重复的 `token_count`
 - token 拆分：`input`(未缓存) / `cache`(creation+read) / `output`；UI 默认把 cache 并入 In 显示，并单列「cached %」
 - 价格匹配：精确名 → 归一化名（去厂商前缀 + `.`↔`p`，如 `glm-5.1`⇄`glm-5p1`）；models.dev 优先官方裸名价
 - 成本按四类 token 分别计价；模型带 `priced` 标记，**两源都查不到的模型只计 Token、UI 标注「暂无定价」**
 - 日志只有裸模型名、无厂商信息 → 第三方模型默认取官方厂商价（估算）
-- 工具分类：`mcp__<server>__*` 且 server 在用户配置中 → MCP；Skill 调用（`Skill` 工具的 `input.skill`，或 `/skill` 斜杠命令）且在 skills 目录中 → Skill；其余忽略
+- 工具分类：Claude 解析 `mcp__<server>__*` / `Skill` / `/skill`；Codex 解析 `mcp_tool_call_end`（以及可用时的 `Skill` 调用事件），并用当前统计源的用户配置过滤
 
 > 花费为按公开价格的**估算**；订阅用户应理解为「等效消费价值」。
 
@@ -108,8 +110,8 @@ brew update && brew upgrade --cask tokenscope
 ### 首次启动后
 
 - **macOS**：菜单栏出现图标 + 当日 Token 数（如 `⬡ 12.40M`）
-- **Windows**：系统托盘出现图标。Windows 任务栏托盘 API 不支持在图标旁显示文字，**鼠标悬停托盘图标**即可看到当日 Token 数（提示气泡形如 `Tokenscope · today 12.40M`）
-- 左键点击图标开/关面板，右键出菜单（Open / Refresh / Quit）
+- **Windows**：系统托盘出现图标。Windows 任务栏托盘 API 不支持在图标旁显示文字，**鼠标悬停托盘图标**即可看到当前来源及当日 Token 数（如 `Tokenscope · Codex today 12.40M`）
+- 左键点击图标开/关面板，右键可切换 Claude / Codex 或执行 Open / Refresh / Quit
 - 已自动设置**登录自启**，无需手动配置
 
 ## 开发
@@ -125,6 +127,8 @@ pnpm tauri dev         # 启动桌面 App（需要 Rust 工具链）
 pnpm dev               # http://localhost:1420
 # 刷新快照：
 cd src-tauri && cargo run --example dump > ../public/dev-dashboard.json
+# Codex 快照：
+cd src-tauri && cargo run --example dump -- codex > ../public/dev-dashboard.json
 ```
 
 ## 构建

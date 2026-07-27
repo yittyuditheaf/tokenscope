@@ -1,5 +1,29 @@
 // Shared data structures returned to the frontend.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UsageSource {
+    #[default]
+    Claude,
+    Codex,
+}
+
+impl UsageSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Codex => "Codex",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SeriesPoint {
@@ -73,6 +97,7 @@ pub struct HeatDay {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Dashboard {
+    pub source: UsageSource,
     pub day: PeriodReport,
     pub week: PeriodReport,
     pub month: PeriodReport,

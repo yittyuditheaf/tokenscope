@@ -4,7 +4,7 @@ mod parser;
 mod pricing;
 mod store;
 
-use model::Dashboard;
+use model::{Dashboard, UsageSource};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,7 +37,14 @@ fn now_ms() -> i64 {
 /// Rebuild the dashboard (incremental), update the tray's token count, and push
 /// the fresh data to the UI so an open popover updates live.
 fn refresh(app: &tauri::AppHandle) {
-    let dash = parser::build_dashboard();
+    let source = selected_usage_source(app);
+    let dash = parser::build_dashboard(source);
+    // A source switch can happen while a large first-time ingest is running.
+    // Never let the older build overwrite the newly selected source in the tray
+    // or an open dashboard.
+    if selected_usage_source(app) != source {
+        return;
+    }
     if let Some(tray) = app.tray_by_id("main") {
         let label = fmt_tokens_m(dash.today_tokens);
         // macOS shows the label next to the menu-bar icon (set_title). Windows'
@@ -45,7 +52,11 @@ fn refresh(app: &tauri::AppHandle) {
         // surface the same number through the hover tooltip instead, the only
         // text channel Shell_NotifyIcon exposes for a tray icon.
         let _ = tray.set_title(Some(label.clone()));
-        let _ = tray.set_tooltip(Some(format!("Tokenscope · today {}", label)));
+        let _ = tray.set_tooltip(Some(format!(
+            "Tokenscope · {} today {}",
+            dash.source.label(),
+            label
+        )));
     }
     check_milestones(app, &dash);
     let _ = app.emit("dashboard-updated", &dash);
@@ -118,6 +129,47 @@ fn save_autostart_pref(on: bool) {
     }
 }
 
+// ── Selected usage source ───────────────────────────────────────────────────
+// The right-click tray menu switches which CLI is aggregated. Persisting the
+// choice makes the tray label and panel reopen on the same source after restart.
+struct UsageSelection(std::sync::RwLock<UsageSource>);
+
+fn usage_source_path() -> Option<std::path::PathBuf> {
+    let dir = dirs::data_dir()?.join("tokenscope");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join("usage_source.json"))
+}
+
+fn load_usage_source() -> UsageSource {
+    usage_source_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_usage_source(source: UsageSource) {
+    if let Some(path) = usage_source_path() {
+        if let Ok(text) = serde_json::to_string(&source) {
+            let _ = std::fs::write(path, text);
+        }
+    }
+}
+
+fn selected_usage_source(app: &tauri::AppHandle) -> UsageSource {
+    app.try_state::<UsageSelection>()
+        .and_then(|state| state.0.read().ok().map(|source| *source))
+        .unwrap_or_default()
+}
+
+fn select_usage_source(app: &tauri::AppHandle, source: UsageSource) {
+    if let Some(state) = app.try_state::<UsageSelection>() {
+        if let Ok(mut selected) = state.0.write() {
+            *selected = source;
+        }
+    }
+    save_usage_source(source);
+}
+
 /// Bring the OS launch-at-login registration in line with the saved preference,
 /// returning the effective preference (used to seed the menu checkbox). First
 /// run (no saved pref) defaults to on and records it; thereafter we honor the
@@ -143,13 +195,13 @@ fn reconcile_autostart(app: &tauri::AppHandle) -> bool {
 /// Current calendar-week and calendar-month identifiers, matching parser.rs's
 /// period definitions (Monday-based week, calendar month), so a stored floor is
 /// only ever compared within the same period.
-fn period_ids() -> (String, String) {
+fn period_ids(source: UsageSource) -> (String, String) {
     use chrono::Datelike;
     let d = chrono::Local::now().date_naive();
     let iso = d.iso_week();
     (
-        format!("{}-W{:02}", iso.year(), iso.week()),
-        format!("{}-{:02}", d.year(), d.month()),
+        format!("{}:{}-W{:02}", source.as_str(), iso.year(), iso.week()),
+        format!("{}:{}-{:02}", source.as_str(), d.year(), d.month()),
     )
 }
 
@@ -182,7 +234,7 @@ fn check_milestones(app: &tauri::AppHandle, dash: &Dashboard) {
         return;
     };
     // total_tokens is already in millions, so a 100M milestone is total / 100.
-    let (week_id, month_id) = period_ids();
+    let (week_id, month_id) = period_ids(dash.source);
     let cur = MilestoneState {
         week_id,
         week_floor: (dash.week.metrics.total_tokens / 100.0).floor() as i64,
@@ -604,9 +656,10 @@ async fn get_dashboard(app: tauri::AppHandle) -> Dashboard {
     // holds BUILD_LOCK — running it inline would block the command on the async
     // runtime and, with a large cache, stall the UI. Hop to a blocking worker
     // (the 30s refresh thread already runs the same work off the main thread).
-    let dash = tauri::async_runtime::spawn_blocking(parser::build_dashboard)
+    let source = selected_usage_source(&app);
+    let dash = tauri::async_runtime::spawn_blocking(move || parser::build_dashboard(source))
         .await
-        .unwrap_or_else(|_| parser::build_dashboard());
+        .unwrap_or_else(|_| parser::build_dashboard(source));
     // Sync the tray count to this freshly-fetched value. The panel refetches the
     // instant it opens, while the tray otherwise only refreshes every 30s — so
     // without this the two could disagree for up to 30s during heavy usage.
@@ -615,7 +668,11 @@ async fn get_dashboard(app: tauri::AppHandle) -> Dashboard {
         let _ = tray.set_title(Some(label.clone()));
         // Mirror refresh(): keep the tooltip in sync for Windows, where the
         // title isn't shown next to the icon.
-        let _ = tray.set_tooltip(Some(format!("Tokenscope · today {}", label)));
+        let _ = tray.set_tooltip(Some(format!(
+            "Tokenscope · {} today {}",
+            dash.source.label(),
+            label
+        )));
     }
     check_milestones(&app, &dash);
     dash
@@ -646,7 +703,21 @@ fn save_screenshot(data_url: String) -> Result<String, String> {
 
 /// For CLI/example validation against real logs.
 pub fn dashboard_json() -> String {
-    serde_json::to_string_pretty(&parser::build_dashboard()).unwrap_or_default()
+    dashboard_json_for("claude")
+}
+
+/// Build a real-log snapshot for the requested source. Used by the dump example
+/// so both parsers can be inspected without launching the tray application.
+pub fn dashboard_json_for(source: &str) -> String {
+    let source = if source.eq_ignore_ascii_case("codex") {
+        UsageSource::Codex
+    } else {
+        UsageSource::Claude
+    };
+    // The tray app loads prices on its background worker. The standalone dump
+    // has no such worker, so load the cached/live table here before aggregating.
+    pricing::Pricing::reload_shared();
+    serde_json::to_string_pretty(&parser::build_dashboard(source)).unwrap_or_default()
 }
 
 fn fmt_tokens_m(m: f64) -> String {
@@ -701,6 +772,8 @@ pub fn run() {
             // position_panel (macOS, below the icon) and position_popover_windows
             // (Windows/Linux, above the icon).
             app.manage(TrayAnchor(std::sync::Mutex::new(None)));
+            let usage_source = load_usage_source();
+            app.manage(UsageSelection(std::sync::RwLock::new(usage_source)));
             // Drag-start timestamp so a drag doesn't hide the popover (non-macOS).
             #[cfg(not(target_os = "macos"))]
             app.manage(DragGuard(AtomicI64::new(0)));
@@ -810,11 +883,27 @@ pub fn run() {
             }
 
             // Build the menu-bar tray: app glyph (template icon) + today's tokens.
-            let dash = parser::build_dashboard();
+            let dash = parser::build_dashboard(usage_source);
             let label = fmt_tokens_m(dash.today_tokens);
 
             let open_i = MenuItem::with_id(app, "open", "Open Tokenscope", true, None::<&str>)?;
             let refresh_i = MenuItem::with_id(app, "refresh", "Refresh", true, None::<&str>)?;
+            let claude_i = CheckMenuItem::with_id(
+                app,
+                "source_claude",
+                "Claude usage",
+                true,
+                usage_source == UsageSource::Claude,
+                None::<&str>,
+            )?;
+            let codex_i = CheckMenuItem::with_id(
+                app,
+                "source_codex",
+                "Codex usage",
+                true,
+                usage_source == UsageSource::Codex,
+                None::<&str>,
+            )?;
             // Launch-at-login toggle (a checkbox item). Seeded from the reconciled
             // preference; clicking it flips the OS registration and persists.
             let autostart_i = CheckMenuItem::with_id(
@@ -832,6 +921,9 @@ pub fn run() {
                     &open_i,
                     &refresh_i,
                     &PredefinedMenuItem::separator(app)?,
+                    &claude_i,
+                    &codex_i,
+                    &PredefinedMenuItem::separator(app)?,
                     &autostart_i,
                     &PredefinedMenuItem::separator(app)?,
                     &quit_i,
@@ -843,7 +935,11 @@ pub fn run() {
                 .icon(tauri::include_image!("icons/tray-icon.png"))
                 .icon_as_template(false)
                 .title(&label)
-                .tooltip(format!("Tokenscope · today {}", label))
+                .tooltip(format!(
+                    "Tokenscope · {} today {}",
+                    dash.source.label(),
+                    label
+                ))
                 .menu(&menu)
                 .show_menu_on_left_click(false) // left = toggle panel, right = menu
                 .on_tray_icon_event(move |tray, event| {
@@ -901,6 +997,20 @@ pub fn run() {
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "open" => show_popover(app),
                     "refresh" => refresh(app),
+                    "source_claude" => {
+                        select_usage_source(app, UsageSource::Claude);
+                        let _ = claude_i.set_checked(true);
+                        let _ = codex_i.set_checked(false);
+                        let handle = app.clone();
+                        std::thread::spawn(move || refresh(&handle));
+                    }
+                    "source_codex" => {
+                        select_usage_source(app, UsageSource::Codex);
+                        let _ = claude_i.set_checked(false);
+                        let _ = codex_i.set_checked(true);
+                        let handle = app.clone();
+                        std::thread::spawn(move || refresh(&handle));
+                    }
                     "autostart" => {
                         // Flip the OS registration, re-read the real state, mirror
                         // it into the checkbox, and persist the user's choice.
@@ -938,11 +1048,15 @@ pub fn run() {
 
             // Filesystem watcher: reflect a log write within ~1s instead of
             // waiting up to the 30s poll (PRD wants <=5s). Writes land in
-            // ~/.claude/projects; our own cache lives elsewhere, so this never
-            // self-triggers. Debounced so a burst of writes coalesces into one
+            // ~/.claude/projects or ~/.codex/sessions; our cache lives elsewhere,
+            // so this never self-triggers. Debounced so a burst coalesces into one
             // rebuild; the 30s poll above stays as a fallback. (build_dashboard
             // serializes on BUILD_LOCK, so this and the poll can't race the cache.)
-            if let Some(projects) = dirs::home_dir().map(|h| h.join(".claude").join("projects")) {
+            if let Some(home) = dirs::home_dir() {
+                let mut log_dirs = vec![home.join(".claude").join("projects")];
+                if let Some(codex_home) = config::codex_home() {
+                    log_dirs.push(codex_home.join("sessions"));
+                }
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
                     use notify::{RecursiveMode, Watcher};
@@ -957,11 +1071,17 @@ pub fn run() {
                         Ok(w) => w,
                         Err(_) => return,
                     };
-                    // Claude Code may not have created the dir yet on a fresh
-                    // machine; create it so watch() registers instead of silently
-                    // falling back to the 30s poll for the whole session.
-                    let _ = std::fs::create_dir_all(&projects);
-                    if watcher.watch(&projects, RecursiveMode::Recursive).is_err() {
+                    // Either CLI may not have created its directory yet on a
+                    // fresh machine. Register every available root; the 30s poll
+                    // remains the fallback if none can be watched.
+                    let mut watching = false;
+                    for dir in log_dirs {
+                        let _ = std::fs::create_dir_all(&dir);
+                        if watcher.watch(&dir, RecursiveMode::Recursive).is_ok() {
+                            watching = true;
+                        }
+                    }
+                    if !watching {
                         return;
                     }
                     // Block for the first change, then drain the burst until quiet.

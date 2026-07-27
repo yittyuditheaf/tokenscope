@@ -3988,6 +3988,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-positioner",
  "tauri-plugin-single-instance",
+ "toml 0.8.2",
  "ureq",
  "walkdir",
 ]
